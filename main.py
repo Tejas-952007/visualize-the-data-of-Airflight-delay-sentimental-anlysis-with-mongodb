@@ -14,49 +14,66 @@ st.set_page_config(page_title="Enterprise Social Intelligence", page_icon="🏢"
 # --- DATABASE CONNECTION ---
 @st.cache_resource
 def init_connection():
-    return MongoClient("mongodb://localhost:27017/").SocialMedia_Enterprise
+    try:
+        # Reduced timeout to catch errors faster
+        client = MongoClient("mongodb://localhost:27017/", serverSelectionTimeoutMS=5000)
+        # Trigger an early check
+        client.admin.command('ping')
+        return client.SocialMedia_Enterprise
+    except Exception as e:
+        return None
 
 client = init_connection()
-collection = client["airline_insights"]
 
 # --- DATA LOADING & ENRICHMENT ---
 def load_data_to_mongo():
-    csv_path = os.path.expanduser("~/dbms_mini_project/Tweets.csv")
+    if client is None:
+        st.sidebar.error("❌ MongoDB Error: Is the server running?")
+        return False
+        
+    collection = client["airline_insights"]
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    csv_path = os.path.join(script_dir, "Tweets.csv")
+    
     if not os.path.exists(csv_path):
         st.error(f"CSV file not found at {csv_path}.")
         return False
     
-    df = pd.read_csv(csv_path)
-    
-    # Enterprise Enrichment: Define Categories for "Actionable Insights"
-    categories = {
-        'delay': ['delay', 'late', 'waiting', 'hours', 'schedule'],
-        'staff': ['staff', 'rude', 'attitude', 'employee', 'service'],
-        'money': ['refund', 'money', 'charge', 'price', 'expensive'],
-        'baggage': ['bag', 'luggage', 'lost', 'suitcase']
-    }
+    try:
+        df = pd.read_csv(csv_path)
+        
+        # Enterprise Enrichment: Define Categories for "Actionable Insights"
+        categories = {
+            'delay': ['delay', 'late', 'waiting', 'hours', 'schedule'],
+            'staff': ['staff', 'rude', 'attitude', 'employee', 'service'],
+            'money': ['refund', 'money', 'charge', 'price', 'expensive'],
+            'baggage': ['bag', 'luggage', 'lost', 'suitcase']
+        }
 
-    def categorize_tweet(text):
-        text = str(text).lower()
-        for cat, keywords in categories.items():
-            if any(k in text for k in keywords):
-                return cat
-        return 'other'
+        def categorize_tweet(text):
+            text = str(text).lower()
+            for cat, keywords in categories.items():
+                if any(k in text for k in keywords):
+                    return cat
+            return 'other'
 
-    json_records = []
-    for _, row in df.iterrows():
-        json_records.append({
-            "tweet_id": row['tweet_id'],
-            "user": {"name": row['name']},
-            "content": row['text'],
-            "sentiment": row['airline_sentiment'],
-            "category": categorize_tweet(row['text']),
-            "impact_score": len(str(row['text']).split()) * 1.5 
-        })
-    
-    collection.delete_many({})
-    collection.insert_many(json_records)
-    return True
+        json_records = []
+        for _, row in df.iterrows():
+            json_records.append({
+                "tweet_id": row['tweet_id'],
+                "user": {"name": row['name']},
+                "content": row['text'],
+                "sentiment": row['airline_sentiment'],
+                "category": categorize_tweet(row['text']),
+                "impact_score": len(str(row['text']).split()) * 1.5 
+            })
+        
+        collection.delete_many({})
+        collection.insert_many(json_records)
+        return True
+    except Exception as e:
+        st.error(f"Error processing pipeline: {e}")
+        return False
 
 # --- UI LAYOUT ---
 st.title("🏢 Enterprise Social Intelligence Dashboard")
@@ -64,6 +81,10 @@ st.markdown("### Turning Noise into Actionable Business Decisions")
 
 # Sidebar
 st.sidebar.header("⚙️ System Controls")
+if client is None:
+    st.sidebar.error("❌ MongoDB is NOT available.")
+    st.sidebar.info("Please start MongoDB using: `sudo systemctl start mongod` if available.")
+
 if st.sidebar.button("🚀 Run Enterprise Pipeline"):
     with st.spinner("Processing High-Value Insights..."):
         if load_data_to_mongo():
@@ -71,9 +92,17 @@ if st.sidebar.button("🚀 Run Enterprise Pipeline"):
         else:
             st.sidebar.error("Pipeline Failed!")
 
-# Fetch data
-data = list(collection.find({}, {"_id": 0}))
-df = pd.DataFrame(data)
+# Fetch data if possible
+if client:
+    try:
+        collection = client["airline_insights"]
+        data = list(collection.find({}, {"_id": 0}))
+        df = pd.DataFrame(data)
+    except Exception as e:
+        st.error(f"Database error: {e}")
+        df = pd.DataFrame()
+else:
+    df = pd.DataFrame()
 
 if not df.empty:
     # --- FIX: Flatten the user dictionary to a column 'user_name' ---
@@ -100,13 +129,17 @@ if not df.empty:
 
     with col_left:
         st.subheader("🎯 Departmental Problem Map")
-        cat_counts = df[df['sentiment'] == 'negative']['category'].value_counts()
-        fig_cat = px.bar(cat_counts, 
-                         labels={'index':'Issue Category', 'value':'Count'},
-                         color=cat_counts.values, 
-                         color_continuous_scale='Reds')
-        fig_cat.update_layout(xaxis_title="Department", yaxis_title="Number of Complaints")
-        st.plotly_chart(fig_cat, use_container_width=True)
+        neg_df = df[df['sentiment'] == 'negative']
+        if not neg_df.empty:
+            cat_counts = neg_df['category'].value_counts()
+            fig_cat = px.bar(cat_counts, 
+                             labels={'index':'Issue Category', 'value':'Count'},
+                             color=cat_counts.values, 
+                             color_continuous_scale='Reds')
+            fig_cat.update_layout(xaxis_title="Department", yaxis_title="Number of Complaints")
+            st.plotly_chart(fig_cat, use_container_width=True)
+        else:
+            st.info("No negative sentiment detected today.")
         st.info("💡 **Insight:** Use this to allocate resources to the failing department.")
 
     with col_right:
@@ -123,9 +156,15 @@ if not df.empty:
 
     # --- ROW 3: PRIORITY LIST ---
     st.subheader("🚩 High-Priority Intervention List")
-    # Corrected the column names here to use 'user_name' instead of 'user.name'
     priority_list = df[df['sentiment'] == 'negative'].sort_values(by='impact_score', ascending=False).head(10)
-    st.table(priority_list[['user_name', 'content', 'category', 'impact_score']])
+    if not priority_list.empty:
+        st.table(priority_list[['user_name', 'content', 'category', 'impact_score']])
+    else:
+        st.success("No high-priority issues at this moment.")
 
 else:
-    st.info("👈 Please click 'Run Enterprise Pipeline' in the sidebar to begin.")
+    if client:
+        st.info("👈 Please click 'Run Enterprise Pipeline' in the sidebar to begin.")
+    else:
+        st.warning("⚠️ Application is in offline mode because MongoDB is not reachable.")
+
