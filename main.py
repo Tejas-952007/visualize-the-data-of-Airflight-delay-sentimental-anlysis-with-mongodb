@@ -93,7 +93,7 @@ if st.sidebar.button("🚀 Run Enterprise Pipeline"):
             st.sidebar.error("Pipeline Failed!")
 
 # Fetch data if possible
-if client:
+if client is not None:
     try:
         collection = client["airline_insights"]
         data = list(collection.find({}, {"_id": 0}))
@@ -163,7 +163,7 @@ if not df.empty:
         st.success("No high-priority issues at this moment.")
 
 else:
-    if client:
+    if client is not None:
         st.info("👈 Please click 'Run Enterprise Pipeline' in the sidebar to begin.")
     else:
         st.warning("⚠️ Application is in offline mode because MongoDB is not reachable.")
